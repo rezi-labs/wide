@@ -1,0 +1,9 @@
+# Route configuration - maps domains to backend URLs
+[routes]
+"local.test.com" = "http://127.0.0.1:8080"
+
+# ACME/Let's Encrypt configuration
+[acme]
+email = "test@local.test.com"
+cert_dir = "./certs"
+staging = true

@@ -1,0 +1,14 @@
+# Example configuration for the reverse proxy with Let's Encrypt support
+
+# Route configuration - maps domains to backend URLs
+# Each key is a domain, each value is the full backend URL (including protocol)
+[routes]
+"local.test.com" = "http://127.0.0.1:3000"
+"api.local.test.com" = "http://127.0.0.1:3001"  
+"secure.local.test.com" = "https://127.0.0.1:3002"
+
+# ACME/Let's Encrypt configuration (optional)
+[acme]
+email = "admin@local.test.com"      # Email for Let's Encrypt account
+cert_dir = "./certs"             # Directory to store certificates  
+staging = false                  # Set to true for Let's Encrypt staging environment
