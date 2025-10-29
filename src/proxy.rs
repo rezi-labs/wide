@@ -1,12 +1,10 @@
 use axum::{
-    body::Body,
     extract::Request,
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
-use http_body_util::BodyExt;
+use axum_reverse_proxy::ReverseProxy;
 use std::sync::Arc;
-use tower::ServiceExt;
 use tracing::{debug, info};
 
 use crate::certificate::CertificateManager;
@@ -79,27 +77,13 @@ pub async fn proxy_handler(req: Request, config: ProxyConfig) -> Response {
         }
     };
 
-    let service = match axum_proxy::builder_http(backend.clone()) {
-        Ok(builder) => builder.build(axum_proxy::Static("/")),
-        Err(e) => {
-            eprintln!("Failed to build proxy for {backend}: {e}");
-            return (StatusCode::BAD_GATEWAY, "Backend unavailable").into_response();
-        }
-    };
+    let reverse_proxy = ReverseProxy::new("/", backend);
 
-    match service.oneshot(req).await {
-        Ok(Ok(response)) => {
-            let (parts, body) = response.into_parts();
-            let stream = body.into_data_stream();
-            Response::from_parts(parts, Body::from_stream(stream))
-        }
-        Ok(Err(e)) => {
+    match reverse_proxy.proxy_request(req).await {
+        Ok(response) => response,
+        Err(e) => {
             eprintln!("Proxy error: {e:?}");
             (StatusCode::BAD_GATEWAY, "Backend error").into_response()
-        }
-        Err(e) => {
-            eprintln!("Service error: {e:?}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
         }
     }
 }
