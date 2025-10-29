@@ -7,6 +7,7 @@ use axum::{
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
+use tracing::{debug, info};
 
 use crate::certificate::CertificateManager;
 use crate::config::ProxyConfig;
@@ -14,14 +15,27 @@ use crate::config::ProxyConfig;
 pub async fn handle_http_request(
     req: Request,
     _config: ProxyConfig,
-    _cert_manager: Arc<tokio::sync::Mutex<CertificateManager>>,
+    cert_manager: Arc<tokio::sync::Mutex<CertificateManager>>,
 ) -> Response {
     let uri = req.uri();
     let path = uri.path();
 
     if path.starts_with("/.well-known/acme-challenge/") {
-        // In a real implementation, you would serve the challenge response here
-        // For now, return 404
+        // Extract the token from the path
+        if let Some(token) = path.strip_prefix("/.well-known/acme-challenge/") {
+            debug!("ACME challenge request for token: {}", token);
+
+            // Lock the certificate manager to get the challenge response
+            let manager = cert_manager.lock().await;
+            if let Some(key_auth) = manager.get_challenge_response(token) {
+                info!("Serving ACME challenge response for token: {}", token);
+                return (StatusCode::OK, key_auth.clone()).into_response();
+            } else {
+                debug!("ACME challenge token not found: {}", token);
+            }
+        } else {
+            debug!("Invalid ACME challenge path: {}", path);
+        }
         return (StatusCode::NOT_FOUND, "Challenge not found").into_response();
     }
 
