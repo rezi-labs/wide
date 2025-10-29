@@ -8,10 +8,12 @@ use tracing::info;
 mod certificate;
 mod config;
 mod proxy;
+mod view;
 
 use certificate::{CertificateManager, create_dynamic_tls_config};
 use config::{ProxyConfig, load_config};
 use proxy::{handle_http_request, proxy_handler};
+use view::create_view_router;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,10 +43,14 @@ async fn main() -> Result<()> {
 
 async fn run_http_only(config: ProxyConfig) -> Result<()> {
     let http_port = config.server.http_port;
-    let app = Router::new().fallback(move |req: Request| proxy_handler(req, config.clone()));
+    let view_router = create_view_router(config.clone());
+    let app = Router::new()
+        .merge(view_router)
+        .fallback(move |req: Request| proxy_handler(req, config.clone()));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
-    info!("HTTP-only reverse proxy listening on {}", addr);
+    info!("HTTP-only reverse proxy listening on http://{}", addr);
+    info!("HTTP-only reverse proxy view on http://{}/view", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -66,7 +72,7 @@ async fn run_with_https(config: ProxyConfig) -> Result<()> {
         });
 
         let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
-        info!("HTTP server (redirects/ACME) listening on {}", addr);
+        info!("HTTP server (redirects/ACME) listening on http://{}", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         axum::serve(listener, app).await.unwrap();
@@ -78,10 +84,14 @@ async fn run_with_https(config: ProxyConfig) -> Result<()> {
 
     let tls_config = create_dynamic_tls_config(cert_manager.clone()).await?;
 
-    let app = Router::new().fallback(move |req: Request| proxy_handler(req, https_config.clone()));
+    let view_router = create_view_router(https_config.clone());
+    let app = Router::new()
+        .merge(view_router)
+        .fallback(move |req: Request| proxy_handler(req, https_config.clone()));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], https_port));
     info!("HTTPS reverse proxy listening on {}", addr);
+    info!("HTTPS reverse proxy view on {}/view", addr);
 
     axum_server::bind_rustls(addr, tls_config)
         .serve(app.into_make_service())
