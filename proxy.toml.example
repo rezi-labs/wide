@@ -12,3 +12,10 @@
 email = "admin@local.test.com"      # Email for Let's Encrypt account
 cert_dir = "./certs"             # Directory to store certificates  
 staging = false                  # Set to true for Let's Encrypt staging environment
+
+# Server configuration (optional)
+# Ports can also be set via environment variables: HTTP_PORT and HTTPS_PORT
+# Environment variables take precedence over config file values
+[server]
+http_port = 80                   # Port for HTTP server (redirects/ACME challenges)
+https_port = 443                 # Port for HTTPS server (main reverse proxy)

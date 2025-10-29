@@ -1,0 +1,17 @@
+[net]
+# Use the sparse protocol for faster dependency downloads
+git-fetch-with-cli = true
+
+[registries.crates-io]
+protocol = "sparse"
+
+[build]
+# Use multiple CPU cores for parallel compilation
+jobs = 4
+
+[profile.release]
+# Optimize for size and performance
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

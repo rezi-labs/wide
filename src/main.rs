@@ -40,9 +40,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_http_only(config: ProxyConfig) -> Result<()> {
+    let http_port = config.server.http_port;
     let app = Router::new().fallback(move |req: Request| proxy_handler(req, config.clone()));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
     info!("HTTP-only reverse proxy listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -57,13 +58,14 @@ async fn run_with_https(config: ProxyConfig) -> Result<()> {
     ));
 
     let http_config = config.clone();
+    let http_port = http_config.server.http_port;
     let http_cert_manager = cert_manager.clone();
     tokio::spawn(async move {
         let app = Router::new().fallback(move |req: Request| {
             handle_http_request(req, http_config.clone(), http_cert_manager.clone())
         });
 
-        let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+        let addr = SocketAddr::from(([0, 0, 0, 0], http_port));
         info!("HTTP server (redirects/ACME) listening on {}", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -71,13 +73,14 @@ async fn run_with_https(config: ProxyConfig) -> Result<()> {
     });
 
     let https_config = config.clone();
+    let https_port = https_config.server.https_port;
     let _https_cert_manager = cert_manager.clone();
 
     let tls_config = create_dynamic_tls_config(cert_manager.clone()).await?;
 
     let app = Router::new().fallback(move |req: Request| proxy_handler(req, https_config.clone()));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8443));
+    let addr = SocketAddr::from(([0, 0, 0, 0], https_port));
     info!("HTTPS reverse proxy listening on {}", addr);
 
     axum_server::bind_rustls(addr, tls_config)

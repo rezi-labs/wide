@@ -7,6 +7,8 @@ pub struct Config {
     pub routes: HashMap<String, String>,
     #[serde(default)]
     pub acme: AcmeConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -19,12 +21,29 @@ pub struct AcmeConfig {
     pub staging: bool,
 }
 
+#[derive(Deserialize, Clone)]
+pub struct ServerConfig {
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
+    #[serde(default = "default_https_port")]
+    pub https_port: u16,
+}
+
 impl Default for AcmeConfig {
     fn default() -> Self {
         Self {
             email: default_email(),
             cert_dir: default_cert_dir(),
             staging: default_staging(),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            http_port: default_http_port(),
+            https_port: default_https_port(),
         }
     }
 }
@@ -41,6 +60,20 @@ fn default_staging() -> bool {
     false
 }
 
+fn default_http_port() -> u16 {
+    std::env::var("HTTP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(80)
+}
+
+fn default_https_port() -> u16 {
+    std::env::var("HTTPS_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(443)
+}
+
 pub async fn load_config() -> Config {
     let config_str = fs::read_to_string("proxy.toml")
         .await
@@ -52,6 +85,7 @@ pub async fn load_config() -> Config {
 pub struct ProxyConfig {
     pub routes: HashMap<String, String>,
     pub acme: AcmeConfig,
+    pub server: ServerConfig,
 }
 
 impl From<Config> for ProxyConfig {
@@ -59,6 +93,7 @@ impl From<Config> for ProxyConfig {
         ProxyConfig {
             routes: value.routes,
             acme: value.acme,
+            server: value.server,
         }
     }
 }
