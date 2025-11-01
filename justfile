@@ -30,3 +30,4 @@ build:
 
 install:
     cargo install --path .
+

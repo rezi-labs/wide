@@ -3,6 +3,8 @@ name = "wide"
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/rezi-labs/wide"
+license-file = "LICENSE"
+description = "A memory-efficient reverse proxy"
 
 [dependencies]
 axum = "0.8"
