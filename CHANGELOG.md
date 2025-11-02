@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/rezi-labs/wide/compare/v0.1.1...v0.1.2) - 2025-11-02
+
+### Added
+
+- docker image
+- acme challenge
+
+### Fixed
+
+- reverse proxing
+- remove docker
+- docker improvments
+
+### Other
+
+- release v0.1.1
+- dist
+- ci
+- wow shiny new dist CI!
+- llm doing things
+- better
+- first impl
+- Initial commit
+
 ## [0.1.1](https://github.com/rezi-labs/wide/compare/v0.1.0...v0.1.1) - 2025-11-02
 
 ### Added
