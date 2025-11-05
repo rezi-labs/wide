@@ -26,7 +26,7 @@ fmt:
     cargo fix --allow-dirty --allow-staged
 
 build:
-    cargo build
+    cargo build --release
 
 install:
     cargo install --path .
