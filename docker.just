@@ -1,0 +1,12 @@
+docker-build version:
+    docker build -t {{image_name}}:{{version}} .
+
+push:
+    just _d_push $(just get_version)
+
+_d_push version:
+    just docker-build {{version}}
+    docker push {{image_name}}:{{version}}
+
+get_version:
+    cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version'

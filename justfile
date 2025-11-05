@@ -1,3 +1,8 @@
+import 'docker.just'
+import? 'private.just'
+
+image_name := "ghcr.io/rezi-labs/wide"
+
 export DISABLE_HTTPS := "true"
 export HTTP_PORT := "8080"
 export HTTPS_PORT := "8443"

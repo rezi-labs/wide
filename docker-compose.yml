@@ -1,0 +1,13 @@
+services:
+  wide:
+    image: ghcr.io/rezi-labs/wide:latest
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      - DISABLE_HTTPS=true
+      - HTTP_PORT=8080
+      - HTTPS_PORT=8443
+    volumes:
+      - ./proxy.toml:/proxy.toml:ro
+    network_mode: host
