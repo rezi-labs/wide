@@ -3,7 +3,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use base64::Engine;
 use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
-    OrderStatus,
+    RetryPolicy,
 };
 use rustls::{
     ServerConfig,
@@ -15,7 +15,7 @@ use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+
 use tokio::fs;
 use tracing::{debug, error, info, warn};
 
@@ -63,17 +63,18 @@ impl CertificateManager {
                 LetsEncrypt::Production.url()
             };
 
-            let (account, _credentials) = Account::create(
-                &NewAccount {
-                    contact: &[&format!("mailto:{}", self.config.email)],
-                    terms_of_service_agreed: true,
-                    only_return_existing: false,
-                },
-                url,
-                None, // External account key not needed for Let's Encrypt
-            )
-            .await
-            .context("Failed to create ACME account")?;
+            let (account, _credentials) = Account::builder()?
+                .create(
+                    &NewAccount {
+                        contact: &[&format!("mailto:{}", self.config.email)],
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    url.to_string(),
+                    None, // External account key not needed for Let's Encrypt
+                )
+                .await
+                .context("Failed to create ACME account")?;
 
             self.account = Some(account);
         }
@@ -252,12 +253,7 @@ impl CertificateManager {
         // Step 1: Create a new order
         info!("Creating new ACME order for domain: {}", domain);
         let identifier = Identifier::Dns(domain.to_string());
-        let mut order = match account
-            .new_order(&NewOrder {
-                identifiers: &[identifier],
-            })
-            .await
-        {
+        let mut order = match account.new_order(&NewOrder::new(&[identifier])).await {
             Ok(order) => order,
             Err(e) => {
                 error!("Failed to create ACME order: {}", e);
@@ -269,36 +265,37 @@ impl CertificateManager {
         info!("ACME order created with URL: {}", order.url());
 
         // Step 2: Process authorizations
-        let authorizations = match order.authorizations().await {
-            Ok(auths) => auths,
-            Err(e) => {
-                error!("Failed to get authorizations: {}", e);
-                return self.create_self_signed_certificate(domain);
-            }
-        };
+        let mut authorizations = order.authorizations();
 
-        for authz in &authorizations {
+        // Use the new challenge-centric API
+        while let Some(result) = authorizations.next().await {
+            let mut authz = match result {
+                Ok(authz) => authz,
+                Err(e) => {
+                    error!("Failed to get authorization: {}", e);
+                    return self.create_self_signed_certificate(domain);
+                }
+            };
+
             if authz.status == AuthorizationStatus::Valid {
                 info!(
                     "Authorization already valid for identifier: {:?}",
-                    authz.identifier
+                    authz.identifier()
                 );
                 continue;
             }
 
             info!(
                 "Processing authorization for identifier: {:?}",
-                authz.identifier
+                authz.identifier()
             );
 
             // Find HTTP-01 challenge
-            let challenge = authz
-                .challenges
-                .iter()
-                .find(|c| c.r#type == ChallengeType::Http01)
+            let mut challenge = authz
+                .challenge(ChallengeType::Http01)
                 .ok_or_else(|| anyhow::anyhow!("No HTTP-01 challenge found"))?;
 
-            let key_auth = order.key_authorization(challenge).as_str().to_string();
+            let key_auth = challenge.key_authorization().as_str().to_string();
             info!("Storing challenge token: {}", challenge.token);
 
             // Store the challenge token and key authorization
@@ -306,7 +303,7 @@ impl CertificateManager {
 
             // Step 3: Signal to Let's Encrypt that we're ready
             info!("Signaling readiness for challenge: {}", challenge.token);
-            if let Err(e) = order.set_challenge_ready(&challenge.url).await {
+            if let Err(e) = challenge.set_ready().await {
                 error!("Failed to signal challenge readiness: {}", e);
                 self.remove_challenge_token(&challenge.token);
                 return self.create_self_signed_certificate(domain);
@@ -315,109 +312,34 @@ impl CertificateManager {
 
         // Step 4: Wait for all challenges to be validated (order becomes ready)
         info!("Waiting for challenge validation...");
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 30; // 5 minutes at 10-second intervals
-        let mut delay = Duration::from_secs(5);
 
-        loop {
-            tokio::time::sleep(delay).await;
-            attempts += 1;
-
-            let state = match order.refresh().await {
-                Ok(state) => state,
-                Err(e) => {
-                    error!("Failed to refresh order: {}", e);
-                    return self.create_self_signed_certificate(domain);
-                }
-            };
-
-            match state.status {
-                OrderStatus::Ready => {
-                    info!("Order is ready - all challenges validated successfully!");
-                    break;
-                }
-                OrderStatus::Invalid => {
-                    error!("Order invalid - challenge validation failed!");
-                    return self.create_self_signed_certificate(domain);
-                }
-                OrderStatus::Pending => {
-                    debug!(
-                        "Order still pending (attempt {}/{})",
-                        attempts, MAX_ATTEMPTS
-                    );
-                    if attempts >= MAX_ATTEMPTS {
-                        error!("Challenge validation timed out");
-                        return self.create_self_signed_certificate(domain);
-                    }
-                    // Exponential backoff like in the example
-                    delay = std::cmp::min(delay * 2, Duration::from_secs(30));
-                }
-                _ => {
-                    debug!("Order status: {:?}", state.status);
-                }
-            }
+        if let Err(e) = order.poll_ready(&RetryPolicy::default()).await {
+            error!("Failed to wait for order to be ready: {}", e);
+            return self.create_self_signed_certificate(domain);
         }
+
+        info!("Order is ready - all challenges validated successfully!");
 
         // Step 5: Generate CSR and finalize order
         info!("All challenges validated, generating certificate...");
 
-        // Generate a private key for the certificate
-        let mut params = rcgen::CertificateParams::new(vec![domain.to_string()]);
-        params.distinguished_name = rcgen::DistinguishedName::new();
-        let cert_key = rcgen::Certificate::from_params(params)?;
-        let csr_der = cert_key.serialize_request_der()?;
-
-        // Finalize the order
-        if let Err(e) = order.finalize(&csr_der).await {
-            error!("Failed to finalize ACME order: {}", e);
-            return self.create_self_signed_certificate(domain);
-        }
+        // Generate a private key for the certificate using the new API
+        let private_key_pem = match order.finalize().await {
+            Ok(key) => key,
+            Err(e) => {
+                error!("Failed to finalize ACME order: {}", e);
+                return self.create_self_signed_certificate(domain);
+            }
+        };
         info!("Order finalized successfully");
 
-        // Step 6: Wait for certificate to be ready
+        // Step 6: Wait for certificate to be ready and download it
         info!("Waiting for certificate to be issued...");
-        let mut attempts = 0;
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            attempts += 1;
 
-            let state = match order.refresh().await {
-                Ok(state) => state,
-                Err(e) => {
-                    error!("Failed to refresh order: {}", e);
-                    return self.create_self_signed_certificate(domain);
-                }
-            };
-
-            match state.status {
-                OrderStatus::Valid => {
-                    info!("Certificate issued successfully!");
-                    break;
-                }
-                OrderStatus::Invalid => {
-                    error!("Certificate order failed!");
-                    return self.create_self_signed_certificate(domain);
-                }
-                OrderStatus::Processing => {
-                    debug!("Certificate still processing (attempt {})", attempts);
-                    if attempts >= 30 {
-                        // 1 minute timeout
-                        error!("Certificate issuance timed out");
-                        return self.create_self_signed_certificate(domain);
-                    }
-                }
-                _ => {
-                    debug!("Order status: {:?}", state.status);
-                }
-            }
-        }
-
-        // Step 7: Download the certificate
-        let cert_chain_pem = match order.certificate().await {
-            Ok(Some(cert)) => cert,
-            Ok(None) => {
-                error!("Certificate not available");
-                return self.create_self_signed_certificate(domain);
+        let cert_chain_pem = match order.poll_certificate(&RetryPolicy::default()).await {
+            Ok(cert) => {
+                info!("Certificate issued successfully!");
+                cert
             }
             Err(e) => {
                 error!("Failed to download certificate: {}", e);
@@ -434,10 +356,14 @@ impl CertificateManager {
             return self.create_self_signed_certificate(domain);
         }
 
-        // Use the private key we generated for the CSR
-        let private_key_der = cert_key.serialize_private_key_der();
-        let private_key =
-            PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(private_key_der));
+        // Parse the private key from PEM format
+        let mut private_keys: Vec<_> =
+            pkcs8_private_keys(&mut private_key_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+        if private_keys.is_empty() {
+            error!("No private key found in generated key");
+            return self.create_self_signed_certificate(domain);
+        }
+        let private_key = PrivateKeyDer::from(private_keys.remove(0));
 
         info!(
             "Successfully obtained Let's Encrypt certificate for {}",
@@ -452,14 +378,15 @@ impl CertificateManager {
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         info!("Creating self-signed certificate for {}", domain);
 
-        let mut params = rcgen::CertificateParams::new(vec![domain.to_string()]);
+        let key_pair = rcgen::KeyPair::generate()?;
+        let mut params = rcgen::CertificateParams::new(vec![domain.to_string()]).unwrap();
         params.distinguished_name = rcgen::DistinguishedName::new();
-        let cert = rcgen::Certificate::from_params(params)?;
+        let cert = params.self_signed(&key_pair)?;
 
-        let cert_der = cert.serialize_der()?;
-        let key_der = cert.serialize_private_key_der();
+        let cert_der = cert.der();
+        let key_der = key_pair.serialize_der();
 
-        let cert_chain = vec![CertificateDer::from(cert_der)];
+        let cert_chain = vec![CertificateDer::from(cert_der.to_vec())];
         let private_key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
 
         Ok((cert_chain, private_key))
@@ -552,14 +479,15 @@ pub async fn create_dynamic_tls_config(
 }
 
 pub fn create_self_signed_config() -> Result<RustlsConfig> {
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
+    let key_pair = rcgen::KeyPair::generate()?;
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
-    let cert = rcgen::Certificate::from_params(params)?;
+    let cert = params.self_signed(&key_pair)?;
 
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
+    let cert_der = cert.der();
+    let key_der = key_pair.serialize_der();
 
-    let cert_chain = vec![CertificateDer::from(cert_der)];
+    let cert_chain = vec![CertificateDer::from(cert_der.to_vec())];
     let private_key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
 
     let config = ServerConfig::builder()
@@ -571,14 +499,15 @@ pub fn create_self_signed_config() -> Result<RustlsConfig> {
 }
 
 fn create_self_signed_certified_key() -> Result<CertifiedKey> {
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
+    let key_pair = rcgen::KeyPair::generate()?;
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
     params.distinguished_name = rcgen::DistinguishedName::new();
-    let cert = rcgen::Certificate::from_params(params)?;
+    let cert = params.self_signed(&key_pair)?;
 
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
+    let cert_der = cert.der();
+    let key_der = key_pair.serialize_der();
 
-    let cert_chain = vec![CertificateDer::from(cert_der)];
+    let cert_chain = vec![CertificateDer::from(cert_der.to_vec())];
     let private_key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
 
     let signing_key = any_supported_type(&private_key).context("Failed to create signing key")?;
