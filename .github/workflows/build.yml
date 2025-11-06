@@ -25,6 +25,9 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: install hurl
+        uses: rezi-labs/install-hurl@main
+
       - name: install just
         uses: rezi-labs/install-just@main
 
@@ -45,7 +48,7 @@ jobs:
       - id: release
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.GLOBAL_GITHUB_TOKEN }}
+          token: ${{ secrets.MY_RELEASE_PLEASE_TOKEN }}
           release-type: rust
 
   # Publish the artifacts (only if `verify` passed, and `release` created release)
@@ -62,6 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: install hurl
+        uses: rezi-labs/install-hurl@main
+
       - name: install just
         uses: rezi-labs/install-just@main
 
@@ -69,7 +75,7 @@ jobs:
         with:
           registry: ghcr.io
           username: SilenLoc
-          password: ${{ secrets.GLOBAL_GITHUB_TOKEN }}
+          password: ${{ secrets.MY_RELEASE_PLEASE_TOKEN }}
       - run: |
           just push
         shell: bash
