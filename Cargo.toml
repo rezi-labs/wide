@@ -12,7 +12,7 @@ axum-reverse-proxy = "1.0.3"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "0.9"
 http-body-util = "0.1"
 instant-acme = "0.7"
 tokio-rustls = "0.26"
