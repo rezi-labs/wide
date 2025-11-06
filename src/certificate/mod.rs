@@ -7,7 +7,9 @@ use instant_acme::{
 };
 use rustls::{
     ServerConfig,
+    crypto::ring::sign::any_supported_type,
     pki_types::{CertificateDer, PrivateKeyDer},
+    sign::CertifiedKey,
 };
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::collections::HashMap;
@@ -23,6 +25,20 @@ pub struct CertificateManager {
     config: AcmeConfig,
     account: Option<Account>,
     challenge_tokens: HashMap<String, String>,
+    certificate_cache: HashMap<String, CertifiedKey>,
+}
+
+impl std::fmt::Debug for CertificateManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateManager")
+            .field("config", &self.config)
+            .field("challenge_tokens", &self.challenge_tokens)
+            .field(
+                "certificate_cache",
+                &format!("{} cached certificates", self.certificate_cache.len()),
+            )
+            .finish()
+    }
 }
 
 impl CertificateManager {
@@ -35,6 +51,7 @@ impl CertificateManager {
             config,
             account: None,
             challenge_tokens: HashMap::new(),
+            certificate_cache: HashMap::new(),
         })
     }
 
@@ -93,6 +110,61 @@ impl CertificateManager {
         self.save_certificate_to_disk(domain, &cert_data).await?;
 
         Ok(cert_data)
+    }
+
+    pub async fn get_or_create_certified_key(&mut self, domain: &str) -> Result<CertifiedKey> {
+        // Check if we already have this certificate cached
+        if let Some(cert_key) = self.certificate_cache.get(domain) {
+            return Ok(cert_key.clone());
+        }
+
+        // Get the certificate and private key
+        let (cert_chain, private_key) = self.get_certificate(domain).await?;
+
+        // Create the certified key
+        let cert_key = CertifiedKey::new(cert_chain, any_supported_type(&private_key)?);
+
+        // Cache it for future requests
+        self.certificate_cache
+            .insert(domain.to_string(), cert_key.clone());
+
+        info!("Cached certificate for domain: {}", domain);
+        Ok(cert_key)
+    }
+
+    pub async fn preload_certificates(&mut self, domains: &[String]) -> Result<()> {
+        info!(
+            "🔐 Preloading certificates for {} configured domains: {:?}",
+            domains.len(),
+            domains
+        );
+
+        for domain in domains {
+            match self.get_or_create_certified_key(domain).await {
+                Ok(_) => {
+                    info!("✅ Successfully loaded certificate for domain: {}", domain);
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️  Failed to load certificate for domain {}: {}",
+                        domain, e
+                    );
+                    warn!(
+                        "    → This domain will use the fallback certificate until a valid cert is obtained"
+                    );
+                }
+            }
+        }
+
+        info!(
+            "🎯 Certificate preloading complete. {} domains cached.",
+            self.certificate_cache.len()
+        );
+        Ok(())
+    }
+
+    pub fn get_certificate_for_sni(&self, server_name: &str) -> Option<CertifiedKey> {
+        self.certificate_cache.get(server_name).cloned()
     }
 
     async fn load_certificate_from_disk(
@@ -394,37 +466,89 @@ impl CertificateManager {
     }
 }
 
-pub async fn create_dynamic_tls_config(
+// Custom certificate resolver for SNI-based certificate selection
+#[derive(Debug)]
+pub struct DynamicCertResolver {
     cert_manager: Arc<tokio::sync::Mutex<CertificateManager>>,
-) -> Result<RustlsConfig> {
-    let default_domain =
-        std::env::var("DEFAULT_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+    fallback_cert: Option<CertifiedKey>,
+}
 
-    let mut default_cert = None;
-    {
-        let mut manager = cert_manager.lock().await;
-        match manager.get_certificate(&default_domain).await {
-            Ok(cert_data) => {
-                info!("Successfully obtained certificate for {}", default_domain);
-                default_cert = Some(cert_data);
-            }
-            Err(e) => {
-                warn!("Failed to get certificate for {}: {}", default_domain, e);
-            }
+impl DynamicCertResolver {
+    pub fn new(
+        cert_manager: Arc<tokio::sync::Mutex<CertificateManager>>,
+        fallback_cert: Option<CertifiedKey>,
+    ) -> Self {
+        Self {
+            cert_manager,
+            fallback_cert,
         }
     }
+}
 
-    if let Some((cert_chain, private_key)) = default_cert {
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, private_key)
-            .context("Failed to create TLS config")?;
+impl rustls::server::ResolvesServerCert for DynamicCertResolver {
+    fn resolve(&self, client_hello: rustls::server::ClientHello) -> Option<Arc<CertifiedKey>> {
+        // Get the server name from SNI
+        let server_name = client_hello.server_name()?;
 
-        Ok(RustlsConfig::from_config(Arc::new(config)))
-    } else {
-        warn!("No certificates found, creating self-signed certificate for testing");
-        create_self_signed_config()
+        debug!("🔍 Resolving certificate for SNI: {}", server_name);
+
+        // Try to get certificate from cache (non-blocking)
+        if let Ok(manager) = self.cert_manager.try_lock() {
+            if let Some(cert_key) = manager.get_certificate_for_sni(server_name) {
+                info!("✅ Using cached certificate for domain: {}", server_name);
+                return Some(Arc::new(cert_key));
+            }
+        }
+
+        // If no cached certificate found, use fallback
+        if let Some(ref fallback) = self.fallback_cert {
+            warn!(
+                "🔒 No specific certificate found for '{}', using fallback self-signed certificate",
+                server_name
+            );
+            return Some(Arc::new(fallback.clone()));
+        }
+
+        warn!("❌ No certificate available for domain: {}", server_name);
+        None
     }
+}
+
+pub async fn create_dynamic_tls_config(
+    cert_manager: Arc<tokio::sync::Mutex<CertificateManager>>,
+    domains: Vec<String>,
+) -> Result<RustlsConfig> {
+    if domains.is_empty() {
+        warn!("No domains configured, creating self-signed certificate for testing");
+        return create_self_signed_config();
+    }
+
+    info!(
+        "Setting up dynamic TLS configuration for {} domains",
+        domains.len()
+    );
+
+    // Preload certificates for all domains
+    {
+        let mut manager = cert_manager.lock().await;
+        manager.preload_certificates(&domains).await?;
+    }
+
+    // Create a fallback self-signed certificate
+    let fallback_cert = create_self_signed_certified_key()?;
+
+    // Create the dynamic certificate resolver
+    let cert_resolver = Arc::new(DynamicCertResolver::new(
+        cert_manager.clone(),
+        Some(fallback_cert),
+    ));
+
+    // Build the TLS configuration with the custom resolver
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(cert_resolver);
+
+    Ok(RustlsConfig::from_config(Arc::new(config)))
 }
 
 pub fn create_self_signed_config() -> Result<RustlsConfig> {
@@ -444,4 +568,20 @@ pub fn create_self_signed_config() -> Result<RustlsConfig> {
         .context("Failed to create self-signed TLS config")?;
 
     Ok(RustlsConfig::from_config(Arc::new(config)))
+}
+
+fn create_self_signed_certified_key() -> Result<CertifiedKey> {
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    let cert = rcgen::Certificate::from_params(params)?;
+
+    let cert_der = cert.serialize_der()?;
+    let key_der = cert.serialize_private_key_der();
+
+    let cert_chain = vec![CertificateDer::from(cert_der)];
+    let private_key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(key_der));
+
+    let signing_key = any_supported_type(&private_key).context("Failed to create signing key")?;
+
+    Ok(CertifiedKey::new(cert_chain, signing_key))
 }

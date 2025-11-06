@@ -11,7 +11,7 @@ pub struct Config {
     pub server: ServerConfig,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct AcmeConfig {
     #[serde(default = "default_email")]
     pub email: String,

@@ -82,7 +82,9 @@ async fn run_with_https(config: ProxyConfig) -> Result<()> {
     let https_port = https_config.server.https_port;
     let _https_cert_manager = cert_manager.clone();
 
-    let tls_config = create_dynamic_tls_config(cert_manager.clone()).await?;
+    // Extract domains from configuration
+    let domains: Vec<String> = config.routes.keys().cloned().collect();
+    let tls_config = create_dynamic_tls_config(cert_manager.clone(), domains).await?;
 
     let view_router = create_view_router(https_config.clone());
     let app = Router::new()
